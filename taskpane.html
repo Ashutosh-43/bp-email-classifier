@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BP Classifier</title>
+  <link rel="stylesheet" href="taskpane.css">
+  <!-- Office.js — required for all Outlook add-ins -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" type="text/javascript"></script>
+  <script src="classifier.js"></script>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">bp</div>
+  <h1>Email Classification<br>Assistant</h1>
+</div>
+
+<div class="content">
+
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Initialising...</span>
+  </div>
+
+  <button class="btn-check" id="btnCheck" onclick="runClassification()" disabled>
+    Check Classification
+  </button>
+
+  <!-- Result -->
+  <div class="result-card" id="resultCard">
+    <div id="resultBadge"></div>
+    <div class="sublabel" id="resultSublabel"></div>
+    <div class="conf-wrap">
+      <div class="conf-label" id="confLabel">Confidence: —</div>
+      <div class="conf-bg"><div class="conf-fill" id="confFill" style="width:0%"></div></div>
+    </div>
+    <div class="reasons" id="reasons"></div>
+    <div class="kw-section" id="kwSection"></div>
+    <div id="escalationNote"></div>
+    <div id="humanReview"></div>
+  </div>
+
+  <!-- Quick reference -->
+  <div class="ref-section">
+    <h3>Classification Levels</h3>
+    <div class="ref-item ref-nb"><h4>Non-Business</h4>Personal use, no corporate content. No impact if exposed.</div>
+    <div class="ref-item ref-gen"><h4>General</h4>Routine business info. All-staff comms, training, workplace notices.</div>
+    <div class="ref-item ref-con"><h4>Confidential</h4>PII, HR, contracts, project/engineering data, audit findings.</div>
+    <div class="ref-item ref-sec"><h4>Secret</h4>Mergers, unpublished financials, inside info, material bids. Named recipients only.</div>
+  </div>
+
+  <div class="disclaimer">
+    Guidance only. Does not replace information owner accountability,<br>
+    corporate policy, or legal review.
+  </div>
+
+</div>
+
+<script>
+const LEVEL_META = {
+  nonBusiness:  { label: "Non-Business", badgeClass: "badge-nonBusiness",  cardClass: "level-nonBusiness",  fillClass: "fill-green" },
+  general:      { label: "General",      badgeClass: "badge-general",      cardClass: "level-general",      fillClass: "fill-blue" },
+  confidential: { label: "Confidential", badgeClass: "badge-confidential", cardClass: "level-confidential", fillClass: "fill-orange" },
+  secret:       { label: "Secret",       badgeClass: "badge-secret",       cardClass: "level-secret",       fillClass: "fill-red" }
+};
+
+Office.onReady(function(info) {
+  if (info.host === Office.HostType.Outlook) {
+    setStatus("ready", "Ready — click Check Classification");
+    document.getElementById("btnCheck").disabled = false;
+  } else {
+    setStatus("", "Not running inside Outlook");
+  }
+});
+
+function setStatus(state, text) {
+  const dot = document.getElementById("statusDot");
+  dot.className = "status-dot" + (state ? " " + state : "");
+  document.getElementById("statusText").textContent = text;
+}
+
+function runClassification() {
+  const btn = document.getElementById("btnCheck");
+  btn.disabled = true;
+  btn.textContent = "Reading email...";
+  setStatus("loading", "Reading email content...");
+
+  const item = Office.context.mailbox.item;
+
+  // Read subject, body, to, cc in parallel
+  Promise.all([
+    new Promise(res => item.subject.getAsync(r => res(r.status === Office.AsyncResultStatus.Succeeded ? r.value : ""))),
+    new Promise(res => item.body.getAsync(Office.CoercionType.Text, r => res(r.status === Office.AsyncResultStatus.Succeeded ? r.value : ""))),
+    new Promise(res => item.to.getAsync(r => res(r.status === Office.AsyncResultStatus.Succeeded ? r.value : []))),
+    new Promise(res => item.cc.getAsync(r => res(r.status === Office.AsyncResultStatus.Succeeded ? r.value : [])))
+  ]).then(([subject, body, toRecips, ccRecips]) => {
+    const allRecipients = [...toRecips, ...ccRecips];
+    const result = classify(subject, body, allRecipients, "email", false);
+    renderResult(result);
+    setStatus("ready", "Done — " + new Date().toLocaleTimeString());
+    btn.disabled = false;
+    btn.textContent = "Re-check Classification";
+  }).catch(err => {
+    setStatus("", "Error reading email: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "Check Classification";
+  });
+}
+
+function renderResult(r) {
+  const meta = LEVEL_META[r.level];
+  const card = document.getElementById("resultCard");
+  card.className = `result-card visible ${meta.cardClass}`;
+
+  document.getElementById("resultBadge").innerHTML =
+    `<span class="badge ${meta.badgeClass}">${meta.label}</span>`;
+
+  document.getElementById("resultSublabel").textContent =
+    r.subLabel ? `Sub-label: ${r.subLabel}` : "";
+
+  document.getElementById("confLabel").textContent = `Confidence: ${r.confidence}%`;
+  const fill = document.getElementById("confFill");
+  fill.style.width = r.confidence + "%";
+  fill.className = `conf-fill ${meta.fillClass}`;
+
+  document.getElementById("reasons").innerHTML =
+    `<h3>Why this classification?</h3>` +
+    r.reasons.map(r2 =>
+      `<div class="reason-item"><span class="reason-icon">${r2.icon}</span><span>${r2.text}</span></div>`
+    ).join("");
+
+  const kwEl = document.getElementById("kwSection");
+  kwEl.innerHTML = r.matchedKeywords.length
+    ? `<span>Matched signals: </span>` + r.matchedKeywords.map(k => `<span class="kw-tag">${k}</span>`).join("")
+    : "";
+
+  document.getElementById("escalationNote").innerHTML = r.escalationNote
+    ? `<div class="alert alert-warning">⚠️ ${r.escalationNote}</div>` : "";
+
+  document.getElementById("humanReview").innerHTML = r.requiresHumanReview
+    ? `<div class="alert alert-danger">⚑ Human review recommended — do not rely solely on this tool.</div>` : "";
+}
+</script>
+</body>
+</html>
